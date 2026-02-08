@@ -106,7 +106,7 @@ class VoiceRecog:
 
         # しきい値の設定
         SILENCE_THRESHOLD = 0.01
-        SILENCE_DURATION = 0.5
+        SILENCE_DURATION = 0.1
         # 無音時間計測変数
         silence_passtime = 0
 
@@ -118,7 +118,6 @@ class VoiceRecog:
 
                 # データの音量を計算
                 rms = np.sqrt(np.mean(data**2))
-                print(f"[Dev:rms] {rms:.4}")
                 if rms < SILENCE_THRESHOLD:
                     # 無音のとき
                     # print(f"[Dev] 無音")
