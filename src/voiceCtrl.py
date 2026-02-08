@@ -118,12 +118,15 @@ class VoiceRecog:
 
                 # データの音量を計算
                 rms = np.sqrt(np.mean(data**2))
+                print(f"[Dev:rms] {rms:.4}")
                 if rms < SILENCE_THRESHOLD:
                     # 無音のとき
+                    # print(f"[Dev] 無音")
                     if silence_passtime < SILENCE_DURATION:
                         silence_passtime += (len(data) / self.RATE)
                 else:
                     # 音があるとき
+                    # print(f"[Dev] 有音")
                     silence_passtime = 0
                     accumulated_audio = np.append(accumulated_audio, data)
 
