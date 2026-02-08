@@ -18,7 +18,7 @@ import components as cp
 class voiceControlApp(ft.Container):
     def __init__(self):
         super().__init__()
-        self.width=350
+        self.width=600
 
         # 音声認識エンジンを保持
         self.recog_engine = VoiceRecog(on_update_callback=self.update_result_ui)
@@ -186,7 +186,7 @@ class VoiceRecog():
 
         # しきい値の設定
         SILENCE_THRESHOLD = 0.01
-        SILENCE_DURATION = 0.1
+        SILENCE_DURATION = 0.5
         # 無音時間計測変数
         silence_passtime = 0
 
@@ -267,7 +267,7 @@ class LLM_Proc:
             ユーザが本当に言いたかったダジャレを推測し，変数「dajare」として出力せよ．
             次に「dajare」のダジャレが面白いかどうかを「Evaluate」の評価方法に従って評価し，評価結果を変数「evaluate」として出力せよ．
             最後に評価の理由を端的に説明し，「reason」として出力せよ．
-            なお，評価は辛口気味にするが，毎回「がっくし」ではなく，バラエティに富んだ評価をせよ．
+            なお，評価は辛口気味にするが，毎回最低評価ではなく，バラエティに富んだ評価をせよ．
 
             # Evaluate
             評価は「樂学士」「がっくん」「がっくし」の3段階評価とし，「樂学士」が一番面白く，
