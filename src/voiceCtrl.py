@@ -4,6 +4,8 @@ import numpy as np
 import whisper
 import queue
 import threading
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 # MyLibrary
 import components as cp
@@ -16,42 +18,66 @@ class voiceControlApp(ft.Container):
         # 音声認識エンジンを保持
         self.recog_engine = VoiceRecog(on_update_callback=self.update_result_ui)
         
-        self.status_text = ft.Text("待機中...", color=ft.Colors.GREY_600)
+        self.status_text = ft.Text("", )
         self.result_display = ft.Text("ここに（ry")
+        self.is_recoding = False
+        self.btn_start = cp.StartVoiceButton(
+            content="ダジャレを言う",
+            icon=ft.Icons.KEYBOARD_VOICE,
+            on_click=self.button_clicked,
+            visible=True,
+        )
+        self.btn_finish = cp.FinishVoiceButton(
+            content="判定する",
+            icon=ft.Icons.KEYBOARD_VOICE_OUTLINED,
+            on_click=self.button_clicked,
+            visible=False,
+        )
 
         # Fletページ
         self.content = ft.Column(
             controls=[
                 self.status_text,
                 self.result_display,
-                cp.VoiceRecogButton(
-                    content="Push to talk",
-                    icon=ft.Icons.KEYBOARD_VOICE,
-                    on_click=self.start_button_clicked,
-                ),
+                self.btn_start,
+                self.btn_finish,
             ]
         )
 
-    def start_button_clicked(self, e):
-        self.status_text.value = "マイク使用中..."
-        self.status_text.color = ft.Colors.RED_400
-        self.update()
-        # 解析エンジンの開始
-        self.recog_engine.start()
+    async def button_clicked(self, e):
+        self.is_recoding = not self.is_recoding
+        self.btn_start.visible = not self.btn_start.visible
+        self.btn_finish.visible = not self.btn_finish.visible
+        if self.is_recoding:
+            self.status_text.value = "マイク使用中..."
+            self.status_text.color = ft.Colors.RED_400
+            self.page.update()
+            # 解析エンジンの開始
+            await self.recog_engine.start()
+        else:
+            self.status_text.value = ""
+            # 解析エンジンの終了
+            self.recog_engine.stop()
 
-    def update_result_ui(self, text):
+    async def update_result_ui(self, text):
         self.result_display.value = text
-        self.update()
 
-class VoiceRecog:
+        if self.page:
+            self.page.update()
+        
+
+class VoiceRecog():
     CHUNK = 1024
     FORMAT = pyaudio.paFloat32
     CHANNELS = 1
     RATE = 16000
 
     def __init__(self, on_update_callback):
+        super().__init__
         # 認識結果をUIに渡すためのコールバック関数
         self.on_update_callback = on_update_callback
+        # PyAudioインスタンスを設定
+        self.p = pyaudio.PyAudio()
         # マイクチェック（デバッグ）
         self.mic_check()
         # Whisperモデルのロード
@@ -63,10 +89,9 @@ class VoiceRecog:
         # 音声入力のセットアップ
         self.is_running = False
         self.stream = None
-        self.p = pyaudio.PyAudio()
+        
 
     def mic_check(self):
-        self.p = pyaudio.PyAudio()
         try:
             self.default_info = self.p.get_default_input_device_info()
             print("[Dev] --- Microphone Info ---")
@@ -76,11 +101,13 @@ class VoiceRecog:
         except IOError:
             print("使用可能なマイクが見つかりません。")
 
-        self.p.terminate()
-
-    def start(self):
+    async def start(self):
         if self.is_running:
             return
+        
+        # 前回のデータが残っていたら空にする
+        while not self.audio_queue.empty():
+            self.audio_queue.get()
         
         self.is_running = True
         self.stream = self.p.open(
@@ -92,16 +119,15 @@ class VoiceRecog:
             stream_callback=self.audio_callback
         )
 
-        # 音声処理スレッドの開始
-        self.processing_thread = threading.Thread(target=self.proc_audio)
-        self.processing_thread.start()
+        # 音声処理
+        asyncio.create_task(self.proc_audio())
 
     def audio_callback(self, in_data, frame_count, time_info, status):
         audio_data = np.frombuffer(in_data, dtype=np.float32)
         self.audio_queue.put(audio_data)
         return (in_data, pyaudio.paContinue)
     
-    def proc_audio(self):
+    async def proc_audio(self):
         accumulated_audio = np.array([], dtype=np.float32)
 
         # しきい値の設定
@@ -111,10 +137,9 @@ class VoiceRecog:
         silence_passtime = 0
 
         while self.is_running:
-            # print(f"[Dev:silence_passtime] {silence_passtime}")
             try:
                 # キューからデータを取得
-                data = self.audio_queue.get(timeout=1.0)
+                data = self.audio_queue.get_nowait()
 
                 # データの音量を計算
                 rms = np.sqrt(np.mean(data**2))
@@ -133,21 +158,27 @@ class VoiceRecog:
                 if silence_passtime >= SILENCE_DURATION and len(accumulated_audio) > 100:
                     result = self.whisper_model.transcribe(accumulated_audio, language='ja')
                     text = str(result["text"]).strip()
-                    print(f"[Dev:transcribe] {text}")
-
                     if text:
-                        # UI側の更新関数を呼び出す
-                        self.on_update_callback(text)
+                        print(f"[Devtranscribe] {text}")
+                        if self.on_update_callback:
+                            await self.on_update_callback(text)
 
                     # バッファリセット
                     accumulated_audio = np.array([], dtype=np.float32)
 
             except queue.Empty:
-                continue
+                await asyncio.sleep(0.1)
 
     def stop(self):
         self.is_running = False
         if self.stream:
             self.stream.stop_stream()
             self.stream.close()
-        self.p.terminate()
+            self.stream = None
+        print(f"[Dev] Recording ended.")
+
+    def __del__(self):
+        try:
+            self.p.terminate()
+        except:
+            pass

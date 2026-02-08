@@ -3,6 +3,13 @@ from dataclasses import field
 
 # 各種ボタンなどのコンポーネント
 @ft.control
-class VoiceRecogButton(ft.Button):
+class VoiceButton(ft.Button):
     expand: bool = field(default=True)
+
+@ft.control
+class StartVoiceButton(VoiceButton):
     bgcolor: ft.Colors = ft.Colors.GREY_900
+
+@ft.control
+class FinishVoiceButton(VoiceButton):
+    bgcolor: ft.Colors = ft.Colors.RED

@@ -4,7 +4,7 @@ import flet as ft
 import voiceCtrl as vc
 
 
-def main(page: ft.Page):
+async def main(page: ft.Page):
     page.title = "Flet_voiceControl"
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     page.vertical_alignment = ft.MainAxisAlignment.CENTER
