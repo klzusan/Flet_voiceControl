@@ -3,9 +3,13 @@ import pyaudio
 import numpy as np
 import whisper
 import queue
-import threading
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from google import genai
+from google.genai import types
+from pydantic import BaseModel
+from dotenv import load_dotenv
+import os
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # MyLibrary
 import components as cp
@@ -17,9 +21,25 @@ class voiceControlApp(ft.Container):
 
         # 音声認識エンジンを保持
         self.recog_engine = VoiceRecog(on_update_callback=self.update_result_ui)
+        # ダジャレを採点するLLM
+        self.judge_engine = LLM_Proc(on_update_callback=self.update_llm_ui)
         
         self.status_text = ft.Text("", )
         self.result_display = ft.Text("ここに（ry")
+
+        # LLMの結果表示
+        self.llm_result_area = ft.Column(visible=False)
+        self.dajare_text = ft.Text(size=20)
+        self.eval_text = ft.Text(size=25, color=ft.Colors.AMBER_700)
+        self.reason_text = ft.Text(italic=True)
+        self.llm_result_area.controls = [
+            ft.Divider(),
+            ft.Text("[判定結果] ", size=12),
+            self.dajare_text,
+            self.eval_text,
+            self.reason_text
+        ]
+
         self.is_recoding = False
         self.btn_start = cp.StartVoiceButton(
             content="ダジャレを言う",
@@ -41,6 +61,7 @@ class voiceControlApp(ft.Container):
                 self.result_display,
                 self.btn_start,
                 self.btn_finish,
+                self.llm_result_area,
             ]
         )
 
@@ -49,6 +70,7 @@ class voiceControlApp(ft.Container):
         self.btn_start.visible = not self.btn_start.visible
         self.btn_finish.visible = not self.btn_finish.visible
         if self.is_recoding:
+            self.llm_result_area.visible = False
             self.status_text.value = "マイク使用中..."
             self.status_text.color = ft.Colors.RED_400
             self.page.update()
@@ -58,10 +80,32 @@ class voiceControlApp(ft.Container):
             self.status_text.value = ""
             # 解析エンジンの終了
             self.recog_engine.stop()
+            self.status_text.value = "採点中..."
+            self.page.update()
+
+            # 音声認識結果をLLMに渡す
+            last_text = self.recog_engine.transciption
+            await self.judge_engine.start(last_text)
 
     async def update_result_ui(self, text):
-        self.result_display.value = text
+        self.result_display.value = f"認識中: {text}"
 
+        if self.page:
+            self.page.update()
+
+    async def update_llm_ui(self, response):
+        if response is None:
+            self.status_text.value = "サーバが混雑しています．もう一度試してね"
+            self.page.update()
+            return
+        res_data = response.parsed
+
+        self.dajare_text.value = f"「{res_data.dajare}」"
+        self.eval_text.value = res_data.evaluation
+        self.reason_text.value = res_data.reason
+
+        self.status_text.value = "結果発表"
+        self.llm_result_area.visible = True
         if self.page:
             self.page.update()
         
@@ -73,9 +117,6 @@ class VoiceRecog():
     RATE = 16000
 
     def __init__(self, on_update_callback):
-        super().__init__
-        # 認識結果をUIに渡すためのコールバック関数
-        self.on_update_callback = on_update_callback
         # PyAudioインスタンスを設定
         self.p = pyaudio.PyAudio()
         # マイクチェック（デバッグ）
@@ -89,7 +130,10 @@ class VoiceRecog():
         # 音声入力のセットアップ
         self.is_running = False
         self.stream = None
-        
+
+        # 以下でプロジェクト特有の変数・関数を設定
+        # 認識結果をUIに渡すためのコールバック関数
+        self.on_update_callback = on_update_callback  
 
     def mic_check(self):
         try:
@@ -145,29 +189,32 @@ class VoiceRecog():
                 rms = np.sqrt(np.mean(data**2))
                 if rms < SILENCE_THRESHOLD:
                     # 無音のとき
-                    # print(f"[Dev] 無音")
                     if silence_passtime < SILENCE_DURATION:
                         silence_passtime += (len(data) / self.RATE)
                 else:
                     # 音があるとき
-                    # print(f"[Dev] 有音")
                     silence_passtime = 0
                     accumulated_audio = np.append(accumulated_audio, data)
 
                 # 解析
                 if silence_passtime >= SILENCE_DURATION and len(accumulated_audio) > 100:
                     result = self.whisper_model.transcribe(accumulated_audio, language='ja')
-                    text = str(result["text"]).strip()
-                    if text:
-                        print(f"[Devtranscribe] {text}")
-                        if self.on_update_callback:
-                            await self.on_update_callback(text)
+                    
+                    if result["text"]:
+                        self.transciption = str(result["text"]).strip()
+                        print(f"[Dev:transcribe] {self.transciption}")
+                        await self.result(self.transciption)
 
                     # バッファリセット
                     accumulated_audio = np.array([], dtype=np.float32)
 
             except queue.Empty:
                 await asyncio.sleep(0.1)
+
+    async def result(self, text):
+        # 認識結果を用いた処理をここで行う
+        if self.on_update_callback:
+            await self.on_update_callback(text)
 
     def stop(self):
         self.is_running = False
@@ -182,3 +229,77 @@ class VoiceRecog():
             self.p.terminate()
         except:
             pass
+
+class LLM_Proc:
+    class DajareEval(BaseModel):
+        dajare: str
+        evaluation: str
+        reason: str
+
+    def __init__(self, on_update_callback):
+        # APIキーの設定
+        self.dotenv_path = ".env"
+        load_dotenv(self.dotenv_path)
+        API_KEY = os.getenv('GEMINI_API_KEY')
+
+        # Gemini APIの設定
+        self.client = genai.Client(api_key=API_KEY)
+        self.on_update_callback = on_update_callback
+
+        self.instruction = f"""
+            # Identity
+            あなたはユーザが入力したダジャレが面白かったかどうかを判定するAIです．
+          
+            # Instructions
+            ユーザが発言した内容が音声認識で解析され変数に格納されているが，解析の精度ゆえ，
+            そのままの文字列では駄洒落になっていないことがある．
+            例えば「(発言)お金はおっかねー」→「(文字列)お金はお金」，「(発言)布団がふっとんだ」→「(文字列)布団が布団だ」等．
+            ユーザが本当に言いたかったダジャレを推測し，変数「dajare」として出力せよ．
+            次に「dajare」のダジャレが面白いかどうかを「Evaluate」の評価方法に従って評価し，評価結果を変数「evaluate」として出力せよ．
+            最後に評価の理由を端的に説明し，「reason」として出力せよ．
+            なお，評価は辛口気味にするが，毎回「がっくし」ではなく，バラエティに富んだ評価をせよ．
+
+            # Evaluate
+            評価は「樂学士」「がっくん」「がっくし」の3段階評価とし，「樂学士」が一番面白く，
+            「がっくし」が一番つまらない評価である．
+
+            # Output format
+            各結果の例をExampleに示す．dajare, evaluation, reasonをすべてJSON形式で出力せよ．
+
+            # Example
+            voice_inputが「布団が布団だ」のとき:
+            dajare: 「布団がふっとんだ」
+            evaluation: 「がっくし」
+            reason: 「ハッキリ言ってつまらない．どのような生活をして何を食べていればそのようなつまらないダジャレを思い浮かぶのか分からない．
+                    その無い思考力をもっと他のことに使えばいいのに」
+        """
+
+    async def start(self, voice_text):
+        if not voice_text:
+            return
+        await self.evaluate(voice_text)
+
+    # 503エラーなどの時に、最大3回まで、待ち時間を増やしながらリトライする
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
+    )
+    async def evaluate(self, voice_input):
+        response = await self.client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            config=types.GenerateContentConfig(
+                system_instruction=self.instruction,
+                response_mime_type="application/json",
+                response_schema= self.DajareEval,
+            ),
+            contents=voice_input,
+        )
+        await self.result(response)
+
+    async def result(self, response):
+        print(f"[Dev:response.parsed]{response.parsed}")
+        # 認識結果を用いた処理をここで行う
+        if self.on_update_callback:
+            await self.on_update_callback(response)
